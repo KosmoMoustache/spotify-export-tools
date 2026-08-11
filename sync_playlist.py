@@ -14,12 +14,17 @@ Usage:
       --url http://localhost:4533 --username <user> --password <pass> \
       [--playlist-id <id> | --playlist-name "My Playlist"] \
       [--library <id-or-name> ... | --library-select] \
-      [--list-libraries] [--dry-run] [--auto-skip]
+      [--list-libraries] [--dry-run] [--auto-skip] [--cache <file>] [--no-cache]
 
 Search can be restricted to specific Subsonic music libraries (folders):
   --list-libraries                    list the server's libraries and exit
   --library <id-or-name>              repeatable; only search these libraries
   --library-select                    choose libraries interactively (checkbox)
+
+Resolved Spotify->Subsonic matches are cached in a txt file (one pair per line,
+spotify key TAB song id) and reused on later runs to skip searching/prompting:
+  --cache <file>                      cache file (default: sync_playlist_cache.txt)
+  --no-cache                          do not read or write the cache
 
 Configuration can also come from environment variables:
   NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASSWORD
@@ -61,6 +66,8 @@ class Config:
     libraries: list = field(default_factory=list)
     library_select: bool = False
     list_libraries: bool = False
+    cache_path: str = "sync_playlist_cache.txt"
+    no_cache: bool = False
 
 
 def parse_args() -> Config:
@@ -88,6 +95,11 @@ def parse_args() -> Config:
                         help="interactively choose which music libraries to search")
     parser.add_argument("--list-libraries", action="store_true",
                         help="list the music libraries on the server and exit")
+    parser.add_argument("--cache", default="sync_playlist_cache.txt",
+                        help="txt file mapping Spotify tracks to Subsonic song ids "
+                             "(default: sync_playlist_cache.txt)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="do not read or write the track-mapping cache file")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
     if not args.username and not args.password:
@@ -100,6 +112,7 @@ def parse_args() -> Config:
         auto_skip=args.auto_skip, verbose=args.verbose,
         libraries=args.library, library_select=args.library_select,
         list_libraries=args.list_libraries,
+        cache_path=args.cache, no_cache=args.no_cache,
     )
 
 
@@ -195,6 +208,14 @@ class SubsonicClient:
         data = self._request("getMusicFolders", {})
         return data.get("musicFolders", {}).get("musicFolder", [])
 
+    def get_song(self, song_id: str) -> dict:
+        """Return the song with the given id, or None if it no longer exists."""
+        try:
+            data = self._request("getSong", {"id": song_id})
+        except RuntimeError:
+            return None
+        return data.get("song")
+
     def get_playlists(self) -> list:
         data = self._request("getPlaylists", {})
         return data.get("playlists", {}).get("playlist", [])
@@ -219,6 +240,42 @@ class SubsonicClient:
 def load_csv_rows(path: str) -> list:
     with open(path, newline="", encoding="utf-8-sig") as f:
         return list(csv.DictReader(f))
+
+
+def track_key(row: dict) -> str:
+    """Stable identifier for a Spotify CSV row, used as the cache key."""
+    uri = (row.get("Track URI") or "").strip()
+    if uri:
+        return uri
+    title = normalize(row.get("Track Name", ""))
+    artists = normalize(row.get("Artist Name(s)", ""))
+    return f"{title}|||{artists}"
+
+
+def load_cache(path: str) -> dict:
+    """Load spotify-key -> subsonic-song-id pairs from a txt file."""
+    mapping = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if not line or "\t" not in line:
+                    continue
+                key, _, song_id = line.partition("\t")
+                if key.strip() and song_id.strip():
+                    mapping[key.strip()] = song_id.strip()
+    except OSError:
+        pass
+    return mapping
+
+
+def save_cache(path: str, mapping: dict) -> int:
+    """Write spotify-key -> subsonic-song-id pairs to a txt file."""
+    entries = sorted(mapping.items())
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        for key, song_id in entries:
+            f.write(f"{key}\t{song_id}\n")
+    return len(entries)
 
 
 def score_song(row: dict, song: dict) -> float:
@@ -354,20 +411,35 @@ def interactive_resolve(client: SubsonicClient, cfg: Config, row: dict,
         return {"id": choice}, "manual"
 
 
-def resolve_track(client: SubsonicClient, cfg: Config, row: dict):
+def resolve_track(client: SubsonicClient, cfg: Config, row: dict, cache: dict):
     title = row.get("Track Name", "").strip()
     artists = row.get("Artist Name(s)", "").strip()
     if not title:
         return None, "no track name in CSV"
+
+    if not cfg.no_cache:
+        key = track_key(row)
+        cached = cache.get(key)
+        if cached:
+            song = client.get_song(cached)
+            if song:
+                return song, "cache"
+            cache.pop(key, None)  # stale id -> drop it and re-resolve
+
     query = f"{title} {artists}".replace(";", " ")
     song = best_auto_match(client, row, query)
     if song:
+        if not cfg.no_cache:
+            cache[key] = song["id"]
         return song, "auto"
     # No confident match with artist: retry once using only the track name,
     # then present the results for user approval.
     print(f"  no confident match for '{title}' by '{artists}'; "
           f"retrying with track name only ...")
-    return interactive_resolve(client, cfg, row, title, title, artists)
+    song, how = interactive_resolve(client, cfg, row, title, title, artists)
+    if song is not None and not cfg.no_cache:
+        cache[key] = song["id"]
+    return song, how
 
 
 def resolve_target_playlist(client: SubsonicClient, cfg: Config, default_name: str) -> dict:
@@ -512,17 +584,24 @@ def main() -> int:
         name = cfg.playlist_name or default_name
         print(f"Playlist '{name}' not found on server — will be created.")
 
+    cache = load_cache(cfg.cache_path) if not cfg.no_cache else {}
+    if cache:
+        print(f"Loaded {len(cache)} cached Spotify->Subsonic mappings from {cfg.cache_path}.")
+
     print(f"Resolving {len(rows)} tracks (CSV order) ...")
     resolved_ids = []
     skipped = []
     auto_count = 0
     manual_count = 0
+    cache_count = 0
     matched = 0
     for i, row in enumerate(rows, start=1):
         try:
-            song, how = resolve_track(client, cfg, row)
+            song, how = resolve_track(client, cfg, row, cache)
         except AbortSync:
             print("\nAborted by user.")
+            if not cfg.no_cache:
+                save_cache(cfg.cache_path, cache)
             return 130
         title = row.get("Track Name", "").strip()
         artists = row.get("Artist Name(s)", "").strip()
@@ -532,7 +611,9 @@ def main() -> int:
         else:
             resolved_ids.append(song["id"])
             matched += 1
-            if how == "auto":
+            if how == "cache":
+                cache_count += 1
+            elif how == "auto":
                 auto_count += 1
             else:
                 manual_count += 1
@@ -540,18 +621,23 @@ def main() -> int:
         time.sleep(cfg.delay)
 
     print()
+    if not cfg.no_cache:
+        n = save_cache(cfg.cache_path, cache)
+        print(f"Saved {n} mapping(s) to {cfg.cache_path}.")
     if cfg.dry_run:
         print("DRY RUN: no changes were made to the server.")
         diff = diff_positions(existing_ids, resolved_ids)
         _print_summary(cfg, rows, target, resolved_ids, skipped,
-                       diff, auto_count, manual_count, applied=False, client=client)
+                       diff, auto_count, manual_count, applied=False, client=client,
+                       cache_count=cache_count)
         return 0
 
     diff = diff_positions(existing_ids, resolved_ids)
     if target and existing_ids == resolved_ids:
         print("Playlist is already up to date — no changes needed.")
         _print_summary(cfg, rows, target, resolved_ids, skipped,
-                       diff, auto_count, manual_count, applied=False, client=client)
+                       diff, auto_count, manual_count, applied=False, client=client,
+                       cache_count=cache_count)
         return 0
 
     if target:
@@ -577,13 +663,15 @@ def main() -> int:
     final_id = target.get("id", "?")
     print(f"Done. Playlist id={final_id}, {len(resolved_ids)} tracks.")
     _print_summary(cfg, rows, target, resolved_ids, skipped,
-                   diff, auto_count, manual_count, applied=True, client=client)
+                   diff, auto_count, manual_count, applied=True, client=client,
+                   cache_count=cache_count)
     return 0
 
 
 def _print_summary(cfg: Config, rows: list, target: dict, resolved_ids: list,
                    skipped: list, diff: dict, auto_count: int, manual_count: int,
-                   applied: bool, client: SubsonicClient = None) -> None:
+                   applied: bool, client: SubsonicClient = None,
+                   cache_count: int = 0) -> None:
     name = (target.get("name") if target else cfg.playlist_name
             or Path(cfg.csv_path).stem)
     lines = []
@@ -596,7 +684,8 @@ def _print_summary(cfg: Config, rows: list, target: dict, resolved_ids: list,
     if client and client.music_folder_ids:
         lines.append(f"Libraries searched : {', '.join(client.music_folder_names or client.music_folder_ids)}")
     lines.append(f"CSV tracks        : {len(rows)}")
-    lines.append(f"Matched           : {len(resolved_ids)} (auto={auto_count}, manual={manual_count})")
+    lines.append(f"Matched           : {len(resolved_ids)} "
+                 f"(cache={cache_count}, auto={auto_count}, manual={manual_count})")
     lines.append(f"Skipped / not found: {len(skipped)}")
     lines.append("-" * 60)
     if target:
