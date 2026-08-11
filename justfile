@@ -27,3 +27,11 @@ run-all: generate-all
 # Show current config help.
 config:
     & {{ binary }} --help config
+
+# Sync a Spotify CSV export to a Subsonic/Navidrome playlist (dry run first).
+sync csv:
+    uv run sync_playlist.py --csv {{ csv }} --dry-run
+
+# Sync a Spotify CSV export to a Subsonic/Navidrome playlist (applies changes).
+sync-apply csv:
+    uv run sync_playlist.py --csv {{ csv }}

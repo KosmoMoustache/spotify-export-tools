@@ -1,0 +1,10 @@
+[project]
+name = "spotify-subsonic-sync"
+version = "0.1.0"
+description = "Sync Spotify CSV playlist exports to a Subsonic/Navidrome playlist, preserving order."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "questionary>=2.1.1",
+    "requests>=2.34.2",
+]
