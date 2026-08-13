@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert check_navidrome.py output (results.txt) into a CSV feed for sldl/sockseek.
+"""Convert check.py output (results.txt) into a CSV feed for sldl/sockseek.
 
 Reads the [MISSING] (and optionally [FORMAT-MISMATCH]/[ERROR]) entries from
 results.txt and writes a CSV that sldl/sockseek can consume directly (column
@@ -32,7 +32,7 @@ class Config:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", default="results.txt")
+    parser.add_argument("--input", default="check-results.txt")
     parser.add_argument("--csv", default="Liked_Songs.csv",
                         help="Spotify export for exact title/artist/album/duration "
                              "(set to '' to parse from the result text only)")

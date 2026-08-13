@@ -10,11 +10,20 @@ search again, skip, or abort). When done, the playlist is created or updated so
 that its entries are exactly the resolved tracks, in CSV order.
 
 Usage:
-  uv run sync_playlist.py --csv "My_Playlist.csv" \
+  uv run sync.py --csv "My_Playlist.csv" \
       --url http://localhost:4533 --username <user> --password <pass> \
       [--playlist-id <id> | --playlist-name "My Playlist"] \
       [--library <id-or-name> ... | --library-select] \
       [--list-libraries] [--dry-run] [--auto-skip] [--cache <file>] [--no-cache]
+
+Credentials (url/username/password) are resolved with this precedence:
+command line > config file (creds.txt by default) > environment variables
+(NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASSWORD) > default URL. The config
+file is a simple key=value text file:
+
+  url = http://localhost:4533
+  username = myuser
+  password = mypass
 
 Search can be restricted to specific Subsonic music libraries (folders):
   --list-libraries                    list the server's libraries and exit
@@ -23,11 +32,8 @@ Search can be restricted to specific Subsonic music libraries (folders):
 
 Resolved Spotify->Subsonic matches are cached in a txt file (one pair per line,
 spotify key TAB song id) and reused on later runs to skip searching/prompting:
-  --cache <file>                      cache file (default: sync_playlist_cache.txt)
+  --cache <file>                      cache file (default: sync_cache.txt)
   --no-cache                          do not read or write the cache
-
-Configuration can also come from environment variables:
-  NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASSWORD
 """
 
 import argparse
@@ -43,30 +49,25 @@ from pathlib import Path
 import questionary
 import requests
 
+from common import (AbortSync, ServerConfig, add_server_options,
+                    interactive_resolve as common_interactive_resolve,
+                    normalize, score_song, server_from_args)
+
 AUTO_MATCH_THRESHOLD = 50
-
-
-class AbortSync(Exception):
-    """Raised when the user asks to stop the sync."""
 
 
 @dataclass
 class Config:
     csv_path: str
-    base_url: str
-    username: str
-    password: str
+    server: ServerConfig
     playlist_id: str
     playlist_name: str
-    timeout: float
-    delay: float
     dry_run: bool
     auto_skip: bool
-    verbose: bool
     libraries: list = field(default_factory=list)
     library_select: bool = False
     list_libraries: bool = False
-    cache_path: str = "sync_playlist_cache.txt"
+    cache_path: str = "sync_cache.txt"
     no_cache: bool = False
 
 
@@ -74,16 +75,11 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", default="Liked_Songs.csv",
                         help="Spotify playlist export CSV (default: Liked_Songs.csv)")
-    parser.add_argument("--url", default=os.environ.get("NAVIDROME_URL", "http://localhost:4533"))
-    parser.add_argument("--username", default=os.environ.get("NAVIDROME_USER", ""))
-    parser.add_argument("--password", default=os.environ.get("NAVIDROME_PASSWORD", ""))
+    add_server_options(parser, default_delay=0.15)
     parser.add_argument("--playlist-id", default="",
                         help="Subsonic playlist id to update (overrides --playlist-name)")
     parser.add_argument("--playlist-name", default="",
                         help="playlist name to find (or create); default: CSV file stem")
-    parser.add_argument("--timeout", type=float, default=10)
-    parser.add_argument("--delay", type=float, default=0.15,
-                        help="seconds to wait between search API calls")
     parser.add_argument("--dry-run", action="store_true",
                         help="resolve tracks but do not create/update the playlist")
     parser.add_argument("--auto-skip", action="store_true",
@@ -95,76 +91,50 @@ def parse_args() -> Config:
                         help="interactively choose which music libraries to search")
     parser.add_argument("--list-libraries", action="store_true",
                         help="list the music libraries on the server and exit")
-    parser.add_argument("--cache", default="sync_playlist_cache.txt",
+    parser.add_argument("--cache", default="sync_cache.txt",
                         help="txt file mapping Spotify tracks to Subsonic song ids "
-                             "(default: sync_playlist_cache.txt)")
+                             "(default: sync_cache.txt)")
     parser.add_argument("--no-cache", action="store_true",
                         help="do not read or write the track-mapping cache file")
-    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
-    if not args.username and not args.password:
-        parser.error("--username/--password (or NAVIDROME_USER/NAVIDROME_PASSWORD) are required")
     return Config(
-        csv_path=args.csv, base_url=args.url.rstrip("/"),
-        username=args.username, password=args.password,
+        csv_path=args.csv, server=server_from_args(parser, args),
         playlist_id=args.playlist_id.strip(), playlist_name=args.playlist_name.strip(),
-        timeout=args.timeout, delay=args.delay, dry_run=args.dry_run,
-        auto_skip=args.auto_skip, verbose=args.verbose,
+        dry_run=args.dry_run, auto_skip=args.auto_skip,
         libraries=args.library, library_select=args.library_select,
         list_libraries=args.list_libraries,
         cache_path=args.cache, no_cache=args.no_cache,
     )
 
 
-def normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text or "")
-    text = (
-        text.replace("\u2018", "'").replace("\u2019", "'")
-        .replace("\u201c", '"').replace("\u201d", '"')
-        .replace("\u02bc", "'").replace("\u00a0", " ")
-    )
-    text = text.casefold().strip()
-    return " ".join(text.split())
-
-
-def format_duration(seconds: str) -> str:
-    try:
-        total = int(float(seconds))
-    except (TypeError, ValueError):
-        return ""
-    if total <= 0:
-        return ""
-    return f"{total // 60}:{total % 60:02d}"
-
-
 class SubsonicClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.api_version = "1.16.1"
-        self.client_name = "sync_playlist"
+        self.client_name = "sync"
         self.session = requests.Session()
         self.music_folder_ids: list = []
         self.music_folder_names: list = []
 
     def _base_params(self) -> dict:
         return {
-            "u": self.cfg.username,
-            "p": self.cfg.password,
+            "u": self.cfg.server.username,
+            "p": self.cfg.server.password,
             "v": self.api_version,
             "c": self.client_name,
             "f": "json",
         }
 
     def _request(self, endpoint: str, params: dict, post: bool = False) -> dict:
-        url = f"{self.cfg.base_url}/rest/{endpoint}"
-        if self.cfg.verbose:
+        url = f"{self.cfg.server.base_url}/rest/{endpoint}"
+        if self.cfg.server.verbose:
             print(f"[verbose] {('POST' if post else 'GET')} /rest/{endpoint} {params}")
         if post:
             resp = self.session.post(url, params=self._base_params(),
-                                     data=params, timeout=self.cfg.timeout)
+                                     data=params, timeout=self.cfg.server.timeout)
         else:
             resp = self.session.get(url, params={**self._base_params(), **params},
-                                    timeout=self.cfg.timeout)
+                                    timeout=self.cfg.server.timeout)
         try:
             resp.raise_for_status()
         except requests.HTTPError as exc:
@@ -278,56 +248,6 @@ def save_cache(path: str, mapping: dict) -> int:
     return len(entries)
 
 
-def score_song(row: dict, song: dict) -> float:
-    """Return a match score for a Subsonic song against a Spotify CSV row."""
-    title = normalize(row.get("Track Name", ""))
-    artists = row.get("Artist Name(s)", "").strip()
-    nav_title = normalize(song.get("title", ""))
-    nav_artist = normalize(song.get("artist", ""))
-
-    score = 0.0
-    if title and nav_title:
-        if title == nav_title:
-            score += 40
-        elif title in nav_title or nav_title in title:
-            score += 20
-        else:
-            score -= 25
-
-    artist_parts = [p for p in artists.split(";") if p.strip()]
-    if artist_parts:
-        part_matched = False
-        for part in artist_parts:
-            a = normalize(part)
-            if a and a == nav_artist:
-                score += 30
-                part_matched = True
-            elif a and nav_artist and len(a) >= 3 and (a in nav_artist or nav_artist in a):
-                score += 12
-                part_matched = True
-        if not part_matched:
-            score -= 25
-
-    try:
-        spotify_ms = int(float(row.get("Duration (ms)", 0) or 0))
-    except (TypeError, ValueError):
-        spotify_ms = 0
-    if spotify_ms:
-        try:
-            song_ms = int(float(song.get("duration", 0) or 0)) * 1000
-        except (TypeError, ValueError):
-            song_ms = 0
-        diff = abs(song_ms - spotify_ms)
-        if diff < 5000:
-            score += 15
-        elif diff < 30000:
-            score += 5
-        else:
-            score -= 15
-
-    return score
-
-
 def best_auto_match(client: SubsonicClient, row: dict, query: str):
     title = normalize(row.get("Track Name", ""))
     artists = row.get("Artist Name(s)", "").strip()
@@ -349,70 +269,28 @@ def best_auto_match(client: SubsonicClient, row: dict, query: str):
     return None
 
 
-def candidate_choices(songs: list, row: dict, max_songs: int = 8) -> list:
-    """Build questionary choices (label, song id) from ranked candidate songs."""
-    ranked = sorted(
-        (s for s in songs if s.get("id")),
-        key=lambda s: score_song(row, s),
-        reverse=True,
-    )
-    choices = []
-    for song in ranked[:max_songs]:
-        album = song.get("album", "") or ""
-        dur = format_duration(song.get("duration"))
-        label = f"{song.get('title', '?')} — {song.get('artist', '?')}"
-        if album:
-            label += f" [{album}]"
-        if dur:
-            label += f" ({dur})"
-        label += f"  #id={song['id']}"
-        choices.append({"name": label, "value": song["id"]})
-    return choices
-
-
 def interactive_resolve(client: SubsonicClient, cfg: Config, row: dict,
-                        query: str, title: str, artists: str):
+                        query: str, title: str, album: str, artists: str):
     """Ask the user how to resolve a track that has no confident match."""
     if cfg.auto_skip:
         return None, "skipped (auto)"
 
     songs = client.search(query)
-    while True:
-        candidates = candidate_choices(songs, row)
-        choices = []
-        if candidates:
-            choices.append(questionary.Separator(" Query result "))
-            choices.extend(candidates)
-            choices.append(questionary.Separator())
-        choices.append({"name": "Skip this track", "value": "__skip__"})
-        choices.append({"name": "Search with different terms", "value": "__search__"})
-        choices.append({"name": "Abort sync", "value": "__abort__"})
 
-        try:
-            choice = questionary.select(
-                f"'{title}' — Choose:",
-                choices=choices,
-            ).unsafe_ask()
-        except KeyboardInterrupt:
-            raise AbortSync() from None
+    def rank(songs: list) -> list:
+        return sorted((s for s in songs if s.get("id")),
+                      key=lambda s: score_song(row, s), reverse=True)[:8]
 
-        if choice == "__skip__":
-            return None, "skipped"
-        if choice == "__abort__":
-            raise AbortSync()
-        if choice == "__search__":
-            new_query = questionary.text(
-                "Search terms:",
-                default=query,
-            ).unsafe_ask()
-            query = new_query.strip() or query
-            songs = client.search(query)
-            continue
-        return {"id": choice}, "manual"
+    song = common_interactive_resolve(f"'{title} - {album} by {artists}' — Choose:", songs,
+                                      client.search, query, rank=rank)
+    if song is None:
+        return None, "skipped"
+    return song, "manual"
 
 
 def resolve_track(client: SubsonicClient, cfg: Config, row: dict, cache: dict):
     title = row.get("Track Name", "").strip()
+    album = row.get("Album Name", "").strip()
     artists = row.get("Artist Name(s)", "").strip()
     if not title:
         return None, "no track name in CSV"
@@ -436,7 +314,7 @@ def resolve_track(client: SubsonicClient, cfg: Config, row: dict, cache: dict):
     # then present the results for user approval.
     print(f"  no confident match for '{title}' by '{artists}'; "
           f"retrying with track name only ...")
-    song, how = interactive_resolve(client, cfg, row, title, title, artists)
+    song, how = interactive_resolve(client, cfg, row, title, title, album, artists)
     if song is not None and not cfg.no_cache:
         cache[key] = song["id"]
     return song, how
@@ -447,7 +325,7 @@ def resolve_target_playlist(client: SubsonicClient, cfg: Config, default_name: s
     if cfg.playlist_id:
         playlist = client.get_playlist(cfg.playlist_id)
         if not playlist:
-            raise RuntimeError(f"Playlist id '{cfg.playlist_id}' not found on {cfg.base_url}")
+            raise RuntimeError(f"Playlist id '{cfg.playlist_id}' not found on {cfg.server.base_url}")
         return playlist
     name = cfg.playlist_name or default_name
     playlists = client.get_playlists()
@@ -506,7 +384,7 @@ def configure_libraries(client: SubsonicClient, cfg: Config) -> None:
     """Resolve the --library / --library-select options into client search filters."""
     folders = client.get_music_folders()
     if cfg.list_libraries:
-        print(f"Music libraries on {cfg.base_url}:")
+        print(f"Music libraries on {cfg.server.base_url}:")
         for f in folders:
             print(f"  {f.get('id')}  {f.get('name', '?')}")
         if not folders:
@@ -550,14 +428,14 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    print(f"Connecting to {cfg.base_url} ...")
+    print(f"Connecting to {cfg.server.base_url} ...")
     client = SubsonicClient(cfg)
     try:
         ping = client.ping()
     except Exception as exc:
-        print(f"FAILED: cannot reach {cfg.base_url}: {exc}", file=sys.stderr)
+        print(f"FAILED: cannot reach {cfg.server.base_url}: {exc}", file=sys.stderr)
         return 1
-    print(f"OK: connected as '{cfg.username}', Subsonic API version {ping.get('version', '?')}")
+    print(f"OK: connected as '{cfg.server.username}', Subsonic API version {ping.get('version', '?')}")
 
     try:
         configure_libraries(client, cfg)
@@ -618,7 +496,7 @@ def main() -> int:
             else:
                 manual_count += 1
             print(f"[{i}/{len(rows)}] OK    {title} - {artists} ({how})")
-        time.sleep(cfg.delay)
+        time.sleep(cfg.server.delay)
 
     print()
     if not cfg.no_cache:
@@ -679,7 +557,7 @@ def _print_summary(cfg: Config, rows: list, target: dict, resolved_ids: list,
     lines.append("SYNC SUMMARY")
     lines.append("=" * 60)
     lines.append(f"Playlist          : {name} (id={target.get('id', '?') if target else 'new'})")
-    lines.append(f"Server            : {cfg.base_url}")
+    lines.append(f"Server            : {cfg.server.base_url}")
     lines.append(f"CSV source        : {cfg.csv_path}")
     if client and client.music_folder_ids:
         lines.append(f"Libraries searched : {', '.join(client.music_folder_names or client.music_folder_ids)}")

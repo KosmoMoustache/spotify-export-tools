@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Check which tracks from Liked_Songs.csv exist in Navidrome.
+"""Check which tracks from .csv exist in Subsonic server.
 
 Usage:
-  python check_navidrome.py [--csv Liked_Songs.csv] [--out results.txt]
-                            [--url http://localhost:4533]
-                            [--user <username>] [--password <password>]
-                            [--timeout 10] [--delay 0.2] [--format flac]
+  python check.py [--csv Liked_Songs.csv] [--out results.txt]
+                            [--format flac] [--auto-skip]
 
-Configuration can also come from environment variables:
-  NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASSWORD
+When a track is not found it is presented interactively with the search
+candidates so you can pick a match, search again, skip, or abort (pass
+--auto-skip to skip such tracks without prompting).
+
+Credentials (url/username/password) are resolved with this precedence:
+command line > config file (> creds.txt by default) > environment
+variables (NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASSWORD) > default URL.
+The config file is a simple key=value text file:
+
+  url = http://localhost:4533
+  username = myuser
+  password = mypass
 
 Uses the Navidrome/Subsonic REST API (/rest/search3). Requires Python 3.8+.
 """
@@ -25,47 +33,37 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 
+from common import (AbortSync, ServerConfig, add_server_options,
+                    interactive_resolve, normalize, score_song, server_from_args)
+
 
 @dataclass
 class Config:
     csv_path: str
     out_path: str
-    base_url: str
-    username: str
-    password: str
-    timeout: int
-    delay: float
-    verbose: bool
-    test: bool
+    server: ServerConfig
     quiet: bool
+    auto_skip: bool
     format: str
 
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", default="Liked_Songs.csv")
-    parser.add_argument("--out", default="results.txt")
-    parser.add_argument("--url", default=os.environ.get("NAVIDROME_URL", "http://localhost:4533"))
-    parser.add_argument("--username", default=os.environ.get("NAVIDROME_USER", ""))
-    parser.add_argument("--password", default=os.environ.get("NAVIDROME_PASSWORD", ""))
-    parser.add_argument("--timeout", type=float, default=10)
-    parser.add_argument("--delay", type=float, default=0.2, help="seconds to wait between API calls")
-    parser.add_argument("--test", action="store_true",
-                        help="only check connectivity/auth, do not scan the CSV")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--out", default="check-results.txt")
+    add_server_options(parser)
     parser.add_argument("--quiet", action="store_true",
                         help="suppress per-track progress output")
-    parser.add_argument("--format", default="",
+    parser.add_argument("--auto-skip", action="store_true",
+                        help="skip tracks without prompting when no match is found")
+    parser.add_argument("--format", default="flac",
                         help="expected audio format for found tracks, e.g. flac; "
                              "tracks with a different content format are reported as FORMAT-MISMATCH")
     args = parser.parse_args()
-    if not args.username and not args.password:
-        parser.error("--username/--password (or NAVIDROME_USER/NAVIDROME_PASSWORD) are required")
     return Config(
-        csv_path=args.csv, out_path=args.out, base_url=args.url.rstrip("/"),
-        username=args.username, password=args.password, timeout=args.timeout,
-        delay=args.delay, verbose=args.verbose, test=args.test, quiet=args.quiet,
-        format=args.format.casefold()
+        csv_path=args.csv, out_path=args.out,
+        server=server_from_args(parser, args),
+        quiet=args.quiet, auto_skip=args.auto_skip, format=args.format.casefold(),
     )
 
 
@@ -77,12 +75,12 @@ class NavidromeClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.api_version = "1.16.1"
-        self.client_name = "check_navidrome"
+        self.client_name = "check"
 
     def _base_params(self) -> dict:
         return {
-            "u": self.cfg.username,
-            "p": self.cfg.password,
+            "u": self.cfg.server.username,
+            "p": self.cfg.server.password,
             "v": self.api_version,
             "c": self.client_name,
             "f": "json",
@@ -91,13 +89,13 @@ class NavidromeClient:
     def _get(self, path: str, params: dict) -> dict:
         query = {**self._base_params(), **params}
         qs = urllib.parse.urlencode(query, quote_via=_percent_encode)
-        url = f"{self.cfg.base_url}{path}?{qs}"
-        if self.cfg.verbose:
+        url = f"{self.cfg.server.base_url}{path}?{qs}"
+        if self.cfg.server.verbose:
             print(f"[verbose] GET {path}?{urllib.parse.urlencode(params, quote_via=_percent_encode)}")
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+        with urllib.request.urlopen(req, timeout=self.cfg.server.timeout) as resp:
             raw = resp.read().decode("utf-8")
-        if self.cfg.verbose:
+        if self.cfg.server.verbose:
             print(f"[verbose] {raw[:400]}")
         return json.loads(raw)
 
@@ -114,41 +112,6 @@ class NavidromeClient:
     def ping(self) -> dict:
         data = self._get("/rest/ping", {})
         return data.get("subsonic-response", {})
-
-
-def test_connection(cfg: Config) -> int:
-    client = NavidromeClient(cfg)
-    print(f"Testing connection to {cfg.base_url}...")
-    try:
-        response = client.ping()
-    except urllib.error.HTTPError as exc:
-        print(f"FAILED: HTTP error {exc.code}: {exc.reason}", file=sys.stderr)
-        return 1
-    except urllib.error.URLError as exc:
-        print(f"FAILED: cannot reach {cfg.base_url}: {exc.reason}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"FAILED: {exc}", file=sys.stderr)
-        return 1
-
-    status = response.get("status")
-    if status == "ok":
-        version = response.get("version", "?")
-        print(f"OK: connected as '{cfg.username}', Navidrome/Subsonic API version {version}")
-        return 0
-    print(f"FAILED: status={status}, error={response.get('error', {}).get('message')}", file=sys.stderr)
-    return 1
-
-
-def normalize(text: str) -> str:
-    text = unicodedata.normalize("NFKD", text or "")
-    text = (
-        text.replace("\u2018", "'").replace("\u2019", "'")
-        .replace("\u201c", '"').replace("\u201d", '"')
-        .replace("\u02bc", "'").replace("\u00a0", " ")
-    )
-    text = text.casefold().strip()
-    return " ".join(text.split())
 
 
 def title_matches(spotify_title: str, nav_title: str) -> bool:
@@ -179,6 +142,32 @@ def evaluate_track(client: NavidromeClient, row: dict):
         if artist_matches(artists, nav_artist) and title_matches(title, nav_title):
             good.append(song)
     return good
+
+
+def prompt_resolve(client: NavidromeClient, cfg: Config, row: dict) -> list:
+    """Ask the user to pick a match for a track that was not found.
+
+    Returns a one-element list with the chosen song, or [] if the track was
+    skipped (or omitted automatically with --auto-skip). Raises AbortSync when
+    the user aborts.
+    """
+    if cfg.auto_skip:
+        return []
+    title = (row.get("Track Name") or "").strip()
+    album = (row.get("Album Name") or "").strip()
+    artists = (row.get("Artist Name(s)") or "").strip()
+    query = f"{title} {artists}".replace(";", " ")
+
+    def search(q: str) -> list:
+        return client.search_tracks(q, song_count=20)
+
+    def rank(songs: list) -> list:
+        return sorted((s for s in songs if s.get("id")),
+                      key=lambda s: score_song(row, s), reverse=True)
+
+    song = interactive_resolve(f"'{title} - {album} by {artists}' — Choose:", search(query), search,
+                               query, rank=rank)
+    return [song] if song else []
 
 
 # Maps MIME subtypes (and noisy variants) to canonical format names.
@@ -217,7 +206,7 @@ def build_text(cfg: Config, rows: list, results: list) -> str:
     total = len(rows)
     found = sum(1 for r in results if r["found"])
     missing = total - found
-    lines.append(f"Checked {total} tracks against {cfg.base_url}: {found} found, {missing} missing.")
+    lines.append(f"Checked {total} tracks against {cfg.server.base_url}: {found} found, {missing} missing.")
     if cfg.format:
         fmt_matches = sum(1 for r in results if r["found"] and format_matches(r["song"], cfg.format))
         fmt_bad = found - fmt_matches
@@ -252,9 +241,6 @@ def main() -> int:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    if cfg.test:
-        return test_connection(cfg)
-
     if not os.path.exists(cfg.csv_path):
         print(f"CSV not found: {cfg.csv_path}", file=sys.stderr)
         return 1
@@ -276,15 +262,24 @@ def main() -> int:
             results.append({"found": False, "match_id": None, "error": "no track name", "song": None})
         else:
             try:
-                found_songs = evaluate_track(client, row)
-                if found_songs:
-                    song = found_songs[0]
+                good = evaluate_track(client, row)
+                if not good:
+                    good = prompt_resolve(client, cfg, row)
+                if good:
+                    song = good[0]
                     fmt = content_format_of(song)
                     if cfg.format and not format_matches(song, cfg.format):
                         fmt_bad_so_far += 1
                     results.append({"found": True, "match_id": song.get("id"), "error": None, "song": song})
                 else:
                     results.append({"found": False, "match_id": None, "error": None, "song": None})
+            except AbortSync:
+                print("\nAborted by user.")
+                body, found, missing = build_text(cfg, rows, results)
+                with open(cfg.out_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(body)
+                print(f"Partial results written to {cfg.out_path}")
+                return 130
             except Exception as exc:
                 print(f"Warning: error while checking '{title}' - {exc}", file=sys.stderr)
                 results.append({"found": False, "match_id": None, "error": str(exc), "song": None})
@@ -292,7 +287,7 @@ def main() -> int:
             found_so_far += 1
         else:
             missing_so_far += 1
-        time.sleep(cfg.delay)
+        time.sleep(cfg.server.delay)
         if not cfg.quiet:
             song = results[-1]["song"]
             fmt = content_format_of(song) if song else ""

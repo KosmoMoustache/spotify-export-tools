@@ -1,37 +1,25 @@
 set shell := ["pwsh", "-NoProfile", "-Command"]
 
 binary := "sockseek/sockseek.exe"
-input  := "sldl_tracks.csv"
-input_all := "sldl_all-var.csv"
 
-# Regenerate the sldl feed from results.txt (missing tracks only).
-generate:
-    python results_to_sldl.py
+# test connectivity/auth with the Subsonic server (ping)
+test *args:
+    uv run subify.py test {{ args }}
 
-# Regenerate the sldl feed including format-mismatch tracks.
-generate-all:
-    python results_to_sldl.py --include-format-mismatch --out {{ input_all }}
+# check which tracks from a Spotify CSV are missing on the server
+check *args:
+    uv run subify.py check {{ args }}
 
-# Dry run: list what would be downloaded without touching the network.
-preview: generate
-    & {{ binary }} {{ input }} --print tracks
+# generate sockseek input CSV file
+sockseek *args:
+    uv run subify.py sockseek {{ args }}
 
-# Download the missing tracks.
-run: generate
-    & {{ binary }} {{ input }}
+# create/update a Subsonic playlist from a Spotify CSV export
+sync *args:
+    uv run subify.py sync {{ args }}
 
-# Download missing + format-mismatch tracks.
-run-all: generate-all
-    & {{ binary }} {{ input_all }}
+# sockseek-preview input="sldl_tracks.csv":
+#     & {{ binary }} {{ input }} --print tracks
 
-# Show current config help.
-config:
-    & {{ binary }} --help config
-
-# Sync a Spotify CSV export to a Subsonic/Navidrome playlist (dry run first).
-sync csv:
-    uv run sync_playlist.py --csv {{ csv }} --dry-run
-
-# Sync a Spotify CSV export to a Subsonic/Navidrome playlist (applies changes).
-sync-apply csv:
-    uv run sync_playlist.py --csv {{ csv }}
+# sockseek-download input="sldl_tracks.csv":
+#     & {{ binary }} {{ input }}

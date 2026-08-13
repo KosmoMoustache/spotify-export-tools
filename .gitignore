@@ -1,7 +1,12 @@
 __pycache__
 .venv
 sockseek
+spotify_playlists
 
+creds.txt
 *.csv
 *.zip
 *.txt
+
+
+!creds.example.txt
