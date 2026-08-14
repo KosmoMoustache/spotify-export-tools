@@ -20,16 +20,15 @@ Usage:
 """
 
 import argparse
-import json
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
+
+import requests
 
 import sockseek
 import check
 import sync
-from common import add_server_options, server_from_args
+from SubsonicClient import SubsonicClient
+from cli import add_server_options, server_from_args
 
 USAGE = f"""\
 Usage:
@@ -60,28 +59,15 @@ def cmd_test(argv: list) -> int:
     server = server_from_args(parser, args)
 
     print(f"Testing connection to {server.base_url}...")
-    params = {
-        "u": server.username,
-        "p": server.password,
-        "v": "1.16.1",
-        "c": "subify",
-        "f": "json",
-    }
-    req = urllib.request.Request(f"{server.base_url}/rest/ping?{urllib.parse.urlencode(params)}")
     try:
-        with urllib.request.urlopen(req, timeout=server.timeout) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        print(f"FAILED: HTTP error {exc.code}: {exc.reason}", file=sys.stderr)
-        return 1
-    except urllib.error.URLError as exc:
-        print(f"FAILED: cannot reach {server.base_url}: {exc.reason}", file=sys.stderr)
+        response = SubsonicClient(server, client_name="subify").ping()
+    except requests.exceptions.ConnectionError as exc:
+        print(f"FAILED: cannot reach {server.base_url}: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
         return 1
 
-    response = json.loads(raw).get("subsonic-response", {})
     status = response.get("status")
     if status == "ok":
         print(f"OK: connected as '{server.username}', Subsonic API version {response.get('version', '?')}")

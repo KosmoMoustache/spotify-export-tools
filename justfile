@@ -18,8 +18,8 @@ sockseek *args:
 sync *args:
     uv run subify.py sync {{ args }}
 
-# sockseek-preview input="sldl_tracks.csv":
+# sockseek-preview input="sockseek_tracks.csv":
 #     & {{ binary }} {{ input }} --print tracks
 
-# sockseek-download input="sldl_tracks.csv":
+# sockseek-download input="sockseek_tracks.csv":
 #     & {{ binary }} {{ input }}
