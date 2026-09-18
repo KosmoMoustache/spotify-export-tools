@@ -10,6 +10,10 @@ test *args:
 check *args:
     uv run subify.py check {{ args }}
 
+# generate MISSING and FORMAT-MISMATCH lists from a Spotify CSV
+wish *args:
+    uv run subify.py wish {{ args }}
+
 # generate sockseek input CSV file
 sockseek *args:
     uv run subify.py sockseek {{ args }}

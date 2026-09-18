@@ -5,6 +5,8 @@ Commands:
   test    test connectivity/auth with the Subsonic server (ping)
   check   check which tracks from a Spotify CSV are missing on the server
           (forwards to check.py)
+  missing generate MISSING and FORMAT-MISMATCH lists from a Spotify CSV
+          (forwards to wish.py)
   sync    create/update a Subsonic playlist from a Spotify CSV export
           (forwards to sync.py)
 
@@ -26,6 +28,7 @@ import requests
 
 import sockseek
 import check
+import wish
 import sync
 from SubsonicClient import SubsonicClient
 from cli import add_server_options, server_from_args
@@ -34,12 +37,14 @@ USAGE = f"""\
 Usage:
   uv run subify.py test [args...]
   uv run subify.py check [args...]
+  uv run subify.py wish [args...]
   uv run subify.py sockseek  [args...]
   uv run subify.py sync  [args...]
 
 Commands:
   test     test connectivity/auth with the Subsonic server
   check    check which tracks from a Spotify CSV are missing on the server
+  missing  generate MISSING and FORMAT-MISMATCH lists from a Spotify CSV
   sockseek generate sockseek input CSV file
   sync     create/update a Subsonic playlist from a Spotify CSV export
 
@@ -89,6 +94,8 @@ def main() -> int:
         return _run(sockseek, "sockseek.py", rest)
     if cmd in ("check",):
         return _run(check, "check.py", rest)
+    if cmd in ("wish",):
+        return _run(wish, "wish.py", rest)
     if cmd in ("sync",):
         return _run(sync, "sync.py", rest)
     if cmd in ("-h", "--help", "help"):
