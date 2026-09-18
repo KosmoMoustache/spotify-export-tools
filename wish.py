@@ -5,7 +5,8 @@ By default the lists are parsed from the check.py results file
 (check-results.txt by default), so no server calls are made. If that file does
 not exist, or when --force-scan is given, the server is searched instead.
 
-The results are written to two files:
+The results are written to a single file (wish.txt by default); pass --split
+to write the two lists to separate files:
 
   * MISSING list          - one "TITLE ARTIST" per line for tracks not found
   * FORMAT-MISMATCH list  - one "TITLE ARTIST <format>" per line for tracks
@@ -16,6 +17,7 @@ Usage:
   uv run subify.py wish --csv "My_Playlist.csv" \
           --url http://localhost:4533 --username <user> --password <pass> \
                 [--from-results check-results.txt] [--force-scan]
+                [--out wish.txt] [--split]
                 [--missing missing.txt] [--mismatch format-mismatch.txt]
                 [--format flac] [--cache <file>] [--no-cache]
 
@@ -39,6 +41,8 @@ from common import load_cache, resolve_from_cache, save_cache
 
 @dataclass
 class MissingConfig(Config):
+    out_path: str = "wish.txt"
+    split: bool = False
     missing_path: str = "missing.txt"
     mismatch_path: str = "format-mismatch.txt"
     format: str = "flac"
@@ -51,15 +55,27 @@ class MissingCLI(CLI):
 
     def add_arguments(self):
         self.parser.add_argument(
+            "--out",
+            default="wish.txt",
+            help="combined output file for both lists (default: wish.txt; "
+            "ignored when --split is used)",
+        )
+        self.parser.add_argument(
+            "--split",
+            action="store_true",
+            help="write the missing and format-mismatch lists to two separate files",
+        )
+        self.parser.add_argument(
             "--missing",
             default="missing.txt",
-            help="output file for tracks not found (default: missing.txt)",
+            help="output file for tracks not found, with --split "
+            "(default: missing.txt)",
         )
         self.parser.add_argument(
             "--mismatch",
             default="format-mismatch.txt",
-            help="output file for tracks with a different audio format "
-            "(default: format-mismatch.txt)",
+            help="output file for tracks with a different audio format, with "
+            "--split (default: format-mismatch.txt)",
         )
         self.parser.add_argument(
             "--format",
@@ -88,6 +104,8 @@ class MissingCLI(CLI):
             auto_skip=args.auto_skip,
             cache_path=args.cache,
             no_cache=args.no_cache,
+            out_path=args.out,
+            split=args.split,
             missing_path=args.missing,
             mismatch_path=args.mismatch,
             format=args.format.casefold(),
@@ -127,17 +145,22 @@ def parse_results(path: str) -> tuple:
 
 
 def write_wish_files(cfg: Config, missing: list, mismatches: list) -> None:
-    with open(cfg.missing_path, "w", encoding="utf-8", newline="") as f:
-        f.write("\n".join(missing))
-        if missing:
-            f.write("\n")
-    with open(cfg.mismatch_path, "w", encoding="utf-8", newline="") as f:
-        f.write("\n".join(mismatches))
-        if mismatches:
-            f.write("\n")
+    def dump(path: str, lines: list) -> None:
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("\n".join(lines))
+            if lines:
+                f.write("\n")
+
+    if cfg.split:
+        dump(cfg.missing_path, missing)
+        dump(cfg.mismatch_path, mismatches)
+        written = f"{cfg.missing_path} and {cfg.mismatch_path}"
+    else:
+        dump(cfg.out_path, [*missing, *mismatches])
+        written = cfg.out_path
     print(
         f"Done. {len(missing)} missing, {len(mismatches)} format mismatches. "
-        f"Written to {cfg.missing_path} and {cfg.mismatch_path}."
+        f"Written to {written}."
     )
 
 
