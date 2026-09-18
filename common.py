@@ -217,7 +217,12 @@ def interactive_resolve(
             choices.append(questionary.Separator())
         choices.append({"name": "Skip this track", "value": "__skip__"})
         choices.append({"name": "Search with different terms", "value": "__search__"})
-        choices.append({"name": "Abort", "value": "__abort__"})
+        choices.append(
+            {
+                "name": "Quit (save logged matches and exit)",
+                "value": "__abort__",
+            }
+        )
         try:
             choice = questionary.select(question, choices=choices).unsafe_ask()
         except KeyboardInterrupt:
