@@ -1,5 +1,7 @@
 __pycache__
 .venv
+.idea 
+
 sockseek
 spotify_playlists
 
@@ -10,3 +12,4 @@ creds.txt
 
 
 !creds.example.txt
+DO NOT COMMIT.md
