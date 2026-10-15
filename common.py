@@ -43,6 +43,24 @@ def artist_matches(spotify_artist: str, nav_artist: str) -> bool:
     )
 
 
+def ascii_fold(text: str) -> str:
+    """Strip non-ASCII characters from text."""
+    return (text or "").encode("ascii", "ignore").decode("ascii").strip()
+
+
+def search_queries(query: str) -> list:
+    """Return query variants to try in order for a fallback search.
+
+    Yields the original query, then the query with all non-ASCII characters
+    removed. Duplicates and empty variants are dropped.
+    """
+    queries = [query]
+    folded = ascii_fold(query)
+    if folded and folded != query:
+        queries.append(folded)
+    return queries
+
+
 def load_cache(path: str) -> dict:
     """Load query -> title|||artist pairs from a txt file."""
     mapping = {}

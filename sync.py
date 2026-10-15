@@ -60,6 +60,7 @@ from common import (
     resolve_from_cache,
     save_cache,
     score_song,
+    search_queries,
 )
 
 AUTO_MATCH_THRESHOLD = 50
@@ -143,19 +144,20 @@ def best_auto_match(client: SubsonicClient, row: dict, query: str):
     artists = row.get("Artist Name(s)", "").strip()
     if not title and not artists:
         return None
-    songs = client.search(query)
-    if not songs:
-        return None
-    ranked = sorted(
-        (s for s in songs if s.get("id")),
-        key=lambda s: score_song(row, s),
-        reverse=True,
-    )
-    if not ranked:
-        return None
-    top = ranked[0]
-    if score_song(row, top) >= AUTO_MATCH_THRESHOLD:
-        return top
+    for q in search_queries(query):
+        songs = client.search(q)
+        if not songs:
+            continue
+        ranked = sorted(
+            (s for s in songs if s.get("id")),
+            key=lambda s: score_song(row, s),
+            reverse=True,
+        )
+        if not ranked:
+            continue
+        top = ranked[0]
+        if score_song(row, top) >= AUTO_MATCH_THRESHOLD:
+            return top
     return None
 
 
