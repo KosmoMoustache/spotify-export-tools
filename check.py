@@ -4,14 +4,14 @@
 Usage:
   uv run check.py --csv "My_Playlist.csv" \
           --url http://localhost:4533 --username <user> --password <pass> \
-                [--out results.txt]
+                [--out out/check-results.txt]
                 [--format flac] [--auto-skip]
                 [--cache <file>] [--no-cache]
 
 When a track is not found it is presented interactively with the search
 candidates so you can pick a match, search again, skip, or abort (pass
 --auto-skip to skip such tracks without prompting). A match confirmed this way
-is logged in the cache file (default: sync_cache.txt) as a link between the
+is logged in the cache file (default: out/sync_cache.txt) as a link between the
 original CSV query and the title/artist found on the server (no song id is
 stored), and on later runs is used as a fallback whenever the same track is not
 found by searching.
@@ -33,10 +33,11 @@ import time
 from dataclasses import dataclass
 
 from SubsonicClient import SubsonicClient
-from cli import CLI, Config, server_from_args
+from cli import CLI, Config, OUT_DIR, server_from_args
 from common import (
     AbortSync,
     artist_matches,
+    ensure_parent_dir,
     interactive_resolve,
     load_cache,
     log_cached_match,
@@ -49,7 +50,7 @@ from common import (
 
 @dataclass
 class CheckConfig(Config):
-    out_path: str = "check-results.txt"
+    out_path: str = os.path.join(OUT_DIR, "check-results.txt")
     quiet: bool = False
     format: str = "flac"
 
@@ -60,8 +61,8 @@ class CheckCLI(CLI):
     def add_arguments(self):
         self.parser.add_argument(
             "--out",
-            default="check-results.txt",
-            help="results output file (default: check-results.txt)",
+            default=os.path.join(OUT_DIR, "check-results.txt"),
+            help="results output file (default: out/check-results.txt)",
         )
         self.parser.add_argument(
             "--format",
@@ -293,6 +294,7 @@ def main() -> int:
                 if not cfg.no_cache:
                     save_cache(cfg.cache_path, cache)
                 body, found, missing = build_text(cfg, rows, results)
+                ensure_parent_dir(cfg.out_path)
                 with open(cfg.out_path, "w", encoding="utf-8", newline="") as f:
                     f.write(body)
                 print(f"Partial results written to {cfg.out_path}")
@@ -326,6 +328,7 @@ def main() -> int:
         print(f"Saved {n} mapping(s) to {cfg.cache_path}.")
 
     body, found, missing = build_text(cfg, rows, results)
+    ensure_parent_dir(cfg.out_path)
     with open(cfg.out_path, "w", encoding="utf-8", newline="") as f:
         f.write(body)
 

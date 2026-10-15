@@ -2,12 +2,12 @@
 """Convert check.py output (results.txt) into a CSV feed for sldl/sockseek.
 
 Reads the [MISSING] (and optionally [FORMAT-MISMATCH]/[ERROR]) entries from
-results.txt and writes a CSV that sldl/sockseek can consume directly (column
-names are auto-detected: Artist / Title / Album / Length).
+out/check-results.txt and writes a CSV that sldl/sockseek can consume directly
+(column names are auto-detected: Artist / Title / Album / Length).
 
 Usage:
-  uv run sockseek.py [--input results.txt] [--csv My_Playlist.csv]
-                            [--out sldl_tracks.csv] [--include-format-mismatch]
+  uv run sockseek.py [--input out/check-results.txt] [--csv My_Playlist.csv]
+                            [--out out/sockseek_tracks.csv] [--include-format-mismatch]
 
 If --csv is provided, the exact title/artist/album/duration are taken from the
 Spotify export; otherwise the title/artist pair is recovered by splitting the
@@ -16,6 +16,7 @@ result line on its last " - ".
 
 import argparse
 import csv
+import os
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -32,14 +33,14 @@ class Config:
 
 def parse_args() -> Config:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", default="check-results.txt")
+    parser.add_argument("--input", default=os.path.join("out", "check-results.txt"))
     parser.add_argument(
         "--csv",
         default="Liked_Songs.csv",
         help="Spotify export for exact title/artist/album/duration "
         "(set to '' to parse from the result text only)",
     )
-    parser.add_argument("--out", default="sockseek_tracks.csv")
+    parser.add_argument("--out", default=os.path.join("out", "sockseek_tracks.csv"))
     parser.add_argument(
         "--include-format-mismatch",
         action="store_true",
@@ -182,6 +183,9 @@ def main() -> int:
             continue
         out.append((artist, title, album, duration))
 
+    out_dir = os.path.dirname(cfg.out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
     with open(cfg.out_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Artist", "Title", "Album", "Length"])

@@ -2,10 +2,10 @@
 """Generate MISSING and FORMAT-MISMATCH lists from a Spotify CSV.
 
 By default the lists are parsed from the check.py results file
-(check-results.txt by default), so no server calls are made. If that file does
+(out/check-results.txt by default), so no server calls are made. If that file does
 not exist, or when --force-scan is given, the server is searched instead.
 
-The results are written to a single file (wish.txt by default); pass --split
+The results are written to a single file (out/wish.txt by default); pass --split
 to write the two lists to separate files:
 
   * MISSING list          - one "TITLE ARTIST" per line for tracks not found
@@ -16,9 +16,9 @@ to write the two lists to separate files:
 Usage:
   uv run subify.py wish --csv "My_Playlist.csv" \
           --url http://localhost:4533 --username <user> --password <pass> \
-                [--from-results check-results.txt] [--force-scan]
-                [--out wish.txt] [--split]
-                [--missing missing.txt] [--mismatch format-mismatch.txt]
+                [--from-results out/check-results.txt] [--force-scan]
+                [--out out/wish.txt] [--split]
+                [--missing out/missing.txt] [--mismatch out/format-mismatch.txt]
                 [--format flac] [--cache <file>] [--no-cache]
 
 Credentials (url/username/password) are resolved with this precedence:
@@ -35,18 +35,18 @@ from dataclasses import dataclass
 
 from SubsonicClient import SubsonicClient
 from check import content_format_of, evaluate_track, format_matches
-from cli import CLI, Config, server_from_args
-from common import load_cache, resolve_from_cache, save_cache
+from cli import CLI, Config, OUT_DIR, server_from_args
+from common import ensure_parent_dir, load_cache, resolve_from_cache, save_cache
 
 
 @dataclass
 class MissingConfig(Config):
-    out_path: str = "wish.txt"
+    out_path: str = os.path.join(OUT_DIR, "wish.txt")
     split: bool = False
-    missing_path: str = "missing.txt"
-    mismatch_path: str = "format-mismatch.txt"
+    missing_path: str = os.path.join(OUT_DIR, "missing.txt")
+    mismatch_path: str = os.path.join(OUT_DIR, "format-mismatch.txt")
     format: str = "flac"
-    results_path: str = "check-results.txt"
+    results_path: str = os.path.join(OUT_DIR, "check-results.txt")
     force_scan: bool = False
 
 
@@ -56,8 +56,8 @@ class MissingCLI(CLI):
     def add_arguments(self):
         self.parser.add_argument(
             "--out",
-            default="wish.txt",
-            help="combined output file for both lists (default: wish.txt; "
+            default=os.path.join(OUT_DIR, "wish.txt"),
+            help="combined output file for both lists (default: out/wish.txt; "
             "ignored when --split is used)",
         )
         self.parser.add_argument(
@@ -67,15 +67,15 @@ class MissingCLI(CLI):
         )
         self.parser.add_argument(
             "--missing",
-            default="missing.txt",
+            default=os.path.join(OUT_DIR, "missing.txt"),
             help="output file for tracks not found, with --split "
-            "(default: missing.txt)",
+            "(default: out/missing.txt)",
         )
         self.parser.add_argument(
             "--mismatch",
-            default="format-mismatch.txt",
+            default=os.path.join(OUT_DIR, "format-mismatch.txt"),
             help="output file for tracks with a different audio format, with "
-            "--split (default: format-mismatch.txt)",
+            "--split (default: out/format-mismatch.txt)",
         )
         self.parser.add_argument(
             "--format",
@@ -86,9 +86,9 @@ class MissingCLI(CLI):
         )
         self.parser.add_argument(
             "--from-results",
-            default="check-results.txt",
+            default=os.path.join(OUT_DIR, "check-results.txt"),
             help="check.py results file to parse instead of scanning the "
-            "server (default: check-results.txt; used only when it exists "
+            "server (default: out/check-results.txt; used only when it exists "
             "unless --force-scan is passed)",
         )
         self.parser.add_argument(
@@ -146,6 +146,7 @@ def parse_results(path: str) -> tuple:
 
 def write_wish_files(cfg: Config, missing: list, mismatches: list) -> None:
     def dump(path: str, lines: list) -> None:
+        ensure_parent_dir(path)
         with open(path, "w", encoding="utf-8", newline="") as f:
             f.write("\n".join(lines))
             if lines:

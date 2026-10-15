@@ -10,6 +10,7 @@ import argparse
 import os
 from dataclasses import dataclass
 
+OUT_DIR = "out"
 DEFAULT_CACHE = "sync_cache.txt"
 DEFAULT_CONFIG = "creds.txt"
 DEFAULT_TIMEOUT = 10.0

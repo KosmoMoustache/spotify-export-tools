@@ -1,5 +1,6 @@
 """Subify tooling."""
 
+import os
 import sys
 import unicodedata
 
@@ -59,9 +60,17 @@ def load_cache(path: str) -> dict:
     return mapping
 
 
+def ensure_parent_dir(path: str) -> None:
+    """Create the parent directory of path if it does not exist."""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def save_cache(path: str, mapping: dict) -> int:
     """Write query -> title|||artist pairs to a txt file."""
     entries = sorted(mapping.items())
+    ensure_parent_dir(path)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         for key, value in entries:
             f.write(f"{key}\t{value}\n")

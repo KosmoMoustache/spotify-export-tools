@@ -34,7 +34,7 @@ Matches you confirm interactively are logged in a shared query cache (one pair
 per line, original query TAB title/artist of the server match; the same file
 check.py uses). On later runs they are used as a fallback whenever a track is
 not found by searching:
-  --cache <file>                      cache file (default: sync_cache.txt)
+  --cache <file>                      cache file (default: out/sync_cache.txt)
   --no-cache                          do not read or write the cache
 """
 
