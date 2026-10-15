@@ -6,7 +6,7 @@ Usage:
           --url http://localhost:4533 --username <user> --password <pass> \
                 [--out out/check-results.txt]
                 [--format flac] [--auto-skip]
-                [--cache <file>] [--no-cache] [--resume]
+                [--cache <file>] [--no-cache] [--resume] [--workers N]
 
 When a track is not found it is presented interactively with the search
 candidates so you can pick a match, search again, skip, or abort (pass
@@ -30,11 +30,13 @@ The config file is a simple key=value text file:
 import csv
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from SubsonicClient import SubsonicClient
-from cli import CLI, Config, OUT_DIR, server_from_args
+from cli import CLI, Config, OUT_DIR, ServerConfig, server_from_args
 from common import (
     AbortSync,
     artist_matches,
@@ -56,6 +58,7 @@ class CheckConfig(Config):
     quiet: bool = False
     format: str = "flac"
     resume: bool = False
+    workers: int = 8
 
 
 class CheckCLI(CLI):
@@ -82,6 +85,13 @@ class CheckCLI(CLI):
             help="resume from the last saved position, auto-skipping "
             "already-processed tracks",
         )
+        self.parser.add_argument(
+            "--workers",
+            type=int,
+            default=8,
+            help="number of concurrent search requests (default: 8; 1 disables "
+            "parallelism)",
+        )
 
     def build_config(self, args) -> CheckConfig:
         return CheckConfig(
@@ -94,6 +104,7 @@ class CheckCLI(CLI):
             quiet=args.quiet,
             format=args.format.casefold(),
             resume=args.resume,
+            workers=args.workers,
         )
 
 
@@ -116,6 +127,30 @@ def evaluate_track(client: SubsonicClient, row: dict):
         if good:
             return good
     return []
+
+
+def _pre_search(server: ServerConfig, rows: list, workers: int) -> list:
+    """Run the confident title+artist search for every row in parallel.
+
+    Returns a list of candidate lists aligned with `rows` ([] for rows with no
+    track name). Each worker thread uses its own SubsonicClient so the
+    requests.Session is never shared across threads.
+    """
+    local = threading.local()
+
+    def worker(row):
+        if not (row.get("Track Name") or "").strip():
+            return []
+        client = getattr(local, "client", None)
+        if client is None:
+            client = SubsonicClient(server, client_name="check")
+            local.client = client
+        return evaluate_track(client, row)
+
+    if workers <= 1:
+        return [worker(row) for row in rows]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(worker, rows))
 
 
 def prompt_resolve(
@@ -328,6 +363,10 @@ def main() -> int:
             f"Loaded {len(cache)} cached query->title/artist links from {cfg.cache_path}."
         )
 
+    if cfg.workers > 1:
+        print(f"Searching {len(rows)} track(s) with {cfg.workers} workers ...")
+    precomputed = _pre_search(cfg.server, rows, cfg.workers)
+
     results = []
     found_so_far = 0
     missing_so_far = 0
@@ -348,7 +387,9 @@ def main() -> int:
             try:
                 query = f"{title} {artists}".replace(";", " ")
                 skip_prompt = i <= resume_after
-                good = evaluate_track(client, row)
+                good = precomputed[i - 1]
+                if not good:
+                    time.sleep(cfg.server.delay)
                 if not good and not cfg.no_cache:
                     good = resolve_from_cache(client, i, len(rows), query, cache)
                 if not good and not skip_prompt:
@@ -402,7 +443,6 @@ def main() -> int:
             found_so_far += 1
         else:
             missing_so_far += 1
-        time.sleep(cfg.server.delay)
         if not cfg.quiet:
             song = results[-1]["song"]
             fmt = content_format_of(song) if song else ""
